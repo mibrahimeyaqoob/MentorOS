@@ -1,0 +1,1 @@
+export default function VectorBrain() { return <div>Vector Brain Placeholder</div>; }

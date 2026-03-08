@@ -1,0 +1,1 @@
+export default function UsageAnalytics() { return <div>Analytics Placeholder</div>; }
