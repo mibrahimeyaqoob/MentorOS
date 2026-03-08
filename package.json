@@ -1,0 +1,11 @@
+{
+  "name": "mentor-os-v2",
+  "version": "1.0.0",
+  "description": "AI Knowledge Extraction Engine",
+  "scripts": {
+    "dev": "concurrently \"npm run dev --prefix client\" \"npm run dev --prefix server\""
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1"
+  }
+}
