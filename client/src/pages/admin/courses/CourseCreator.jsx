@@ -23,19 +23,27 @@ export default function CourseCreator() {
         api.getRouting().then(res => setEngineConfig(res)).catch(e => console.log(e));
     },[]);
 
-    const handleGenerateBlueprint = async () => {
-        if (!engineConfig?.architect?.keyId) return showToast("Please set an API key in the Command Center first.", "error");
-        setLoading(true);
-        try {
-            const sources =[{ type: 'youtube', url: youtubeUrl }];
-            const res = await api.generateBlueprint(formData.topic, formData.audience, engineConfig.architect, sources);
-            setBlueprint(res.blueprint);
-            setStep(3);
-            showToast("Blueprint Generated!", "success");
-        } catch (error) {
-            showToast(error.message, "error");
-        } finally { setLoading(false); }
-    };
+// Find this function inside CourseCreator.jsx and update it:
+
+const handleGenerateBlueprint = async () => {
+    // REMOVED THE KEYID CHECK. 
+    // We now rely on the GCP Service Account configured in your .env
+    if (!engineConfig?.architect?.model) {
+        return showToast("Please select an AI model in the Command Center first.", "error");
+    }
+
+    setLoading(true);
+    try {
+        const sources = [{ type: 'youtube', url: youtubeUrl }];
+        // Pass the selected model config to the backend
+        const res = await api.generateBlueprint(formData.topic, formData.audience, engineConfig.architect, sources);
+        setBlueprint(res.blueprint);
+        setStep(3);
+        showToast("Blueprint Generated!", "success");
+    } catch (error) {
+        showToast(error.message, "error");
+    } finally { setLoading(false); }
+};
 
     const handleExtractAll = async () => {
         setGeneratingAll(true);

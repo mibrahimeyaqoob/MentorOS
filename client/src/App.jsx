@@ -3,18 +3,15 @@ import { BrowserRouter as Router, Routes, Route, Navigate } from "react-router-d
 import { AuthProvider } from "./contexts/AuthContext";
 import { ToastProvider } from "./contexts/ToastContext";
 
-// Layouts
 import ProtectedRoute from "./components/layout/ProtectedRoute";
 import AdminLayout from "./components/layout/AdminLayout";
 
-// Auth Pages
 import Login from "./pages/auth/Login";
 import Signup from "./pages/auth/Signup";
+import ForgotPassword from "./pages/auth/ForgotPassword"; // <-- Added this
 
-// Student
 import StudentDashboard from "./pages/student/StudentDashboard";
 
-// Admin Pages (We will populate these next)
 import Dashboard from "./pages/admin/Dashboard";
 import CourseCreator from "./pages/admin/courses/CourseCreator";
 import ApiManager from "./pages/admin/system/ApiManager";
@@ -32,6 +29,7 @@ export default function App() {
                         <Route path="/" element={<Navigate to="/login" replace />} />
                         <Route path="/login" element={<Login />} />
                         <Route path="/signup" element={<Signup />} />
+                        <Route path="/forgot-password" element={<ForgotPassword />} /> {/* <-- Added this */}
 
                         {/* Student Portal */}
                         <Route element={<ProtectedRoute allowedRoles={['student']} />}>

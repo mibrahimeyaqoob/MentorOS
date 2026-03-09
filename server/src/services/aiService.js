@@ -1,101 +1,106 @@
-// CHANGE THIS LINE (Line 1):
-// FROM: import { GoogleGenerativeAI, SchemaType } from '@google/genai';
-// TO:
-import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
-
+import { GoogleGenAI, Type } from "@google/genai";
 import { supabase } from "../config/db.js";
-import { decrypt } from "../utils/crypto.js";
-import { YoutubeTranscript } from "youtube-transcript";
 
-// Helper to initialize GenAI with a dynamic key
-const getGenAIClient = async (keyId) => {
-    const { data } = await supabase
-        .from("api_keys")
-        .select("encrypted_key")
-        .eq("id", keyId)
-        .single();
-    if (!data) throw new Error("API Key not found or revoked.");
+// 🚀 PRODUCTION AUTHENTICATION:
+// The SDK automatically uses the GOOGLE_APPLICATION_CREDENTIALS environment variable.
+// No more passing API keys manually!
+const ai = new GoogleGenAI({
+    vertexai: true,
+    project: process.env.GOOGLE_CLOUD_PROJECT,
+    location: process.env.GOOGLE_CLOUD_LOCATION || "us-central1",
+});
 
-    const apiKey = decrypt(data.encrypted_key);
-    return new GoogleGenerativeAI(apiKey);
-};
-
-// 1. YouTube Metadata & Transcript
+// 1. YouTube Metadata (Native URL passing)
 export const fetchYoutubeContext = async (url) => {
-    try {
-        // Extract ID
-        const videoId = url.split("v=")[1]?.split("&")[0];
-        if (!videoId) return { text: "", duration: 0 };
-
-        // Attempt Transcript Fetch
-        const transcriptItems =
-            await YoutubeTranscript.fetchTranscript(videoId);
-        const fullText = transcriptItems.map((item) => item.text).join(" ");
-
-        // Rough duration calc
-        const lastItem = transcriptItems[transcriptItems.length - 1];
-        const duration = (lastItem.offset + lastItem.duration) / 60; // in minutes
-
-        return { text: fullText, duration };
-    } catch (e) {
-        console.warn(
-            "Transcript fetch failed, falling back to URL only:",
-            e.message,
-        );
-        return { text: "", duration: 0 };
-    }
+    return { url: url };
 };
 
-// 2. Blueprint Generation
+// 2. Blueprint Generation (Direct YouTube Processing)
 export const generateCourseBlueprint = async (
     topic,
     audience,
     engineConfig,
     sources,
 ) => {
-    const genAI = await getGenAIClient(engineConfig.keyId);
-
-    // Updated Model instantiation
-    const model = genAI.getGenerativeModel({
-        model: engineConfig.model,
-        generationConfig: { responseMimeType: "application/json" },
-    });
-
-    let contextData = "";
-    // Process sources (simple text concatenation for now)
+    const parts = [];
     for (const source of sources) {
         if (source.type === "youtube") {
-            const ytData = await fetchYoutubeContext(source.url);
-            contextData += `\n[Source: YouTube Video ${source.url}]\nTranscript: ${ytData.text.substring(0, 30000)}... (truncated)\n`;
+            parts.push({
+                fileData: {
+                    fileUri: source.url,
+                    mimeType: "video/mp4",
+                },
+            });
         }
     }
 
-    const prompt = `
-    Role: Senior Curriculum Architect.
-    Task: Create a structured course blueprint.
-    Topic: ${topic}
-    Audience: ${audience}
+    parts.push({
+        text: `
+        Role: Senior Curriculum Architect.
+        Task: Create a structured course blueprint from the provided video.
+        Topic: ${topic}
+        Audience: ${audience}
 
-    Context Data:
-    ${contextData}
+        Instructions:
+        1. Watch the attached YouTube video.
+        2. Break the video down into chronological modules.
+        3. Each module MUST be roughly 2-minutes long.
+        4. Extract the core objective of what the instructor is doing in that chunk.
+        `,
+    });
 
-    Return JSON format:
-    {
-        "title": "Course Title",
-        "modules": [
-            { "title": "Module 1 Name", "objective": "What they learn" },
-            { "title": "Module 2 Name", "objective": "What they learn" }
-        ]
-    }
-    `;
+    const responseSchema = {
+        type: Type.OBJECT,
+        properties: {
+            title: {
+                type: Type.STRING,
+                description: "The overarching title of the course",
+            },
+            modules: {
+                type: Type.ARRAY,
+                items: {
+                    type: Type.OBJECT,
+                    properties: {
+                        start_time: {
+                            type: Type.STRING,
+                            description: "e.g., 00:00",
+                        },
+                        end_time: {
+                            type: Type.STRING,
+                            description: "e.g., 02:00",
+                        },
+                        title: {
+                            type: Type.STRING,
+                            description: "Module Title",
+                        },
+                        objective: {
+                            type: Type.STRING,
+                            description: "What the user will learn to do",
+                        },
+                    },
+                    required: ["start_time", "end_time", "title", "objective"],
+                },
+            },
+        },
+        required: ["title", "modules"],
+    };
 
-    const result = await model.generateContent(prompt);
-    const response = JSON.parse(result.response.text());
+    const response = await ai.models.generateContent({
+        // Uses the model selected in the UI frontend routing matrix, defaults to Pro
+        model: engineConfig.model || "gemini-3.1-pro-preview",
+        contents: [{ role: "user", parts: parts }],
+        config: {
+            responseMimeType: "application/json",
+            responseSchema: responseSchema,
+            thinkingConfig: { thinkingLevel: "HIGH" },
+        },
+    });
 
-    return { blueprint: response, usage: result.response.usageMetadata };
+    const blueprint = JSON.parse(response.text);
+    return { blueprint, usage: response.usageMetadata };
 };
 
-// 3. Step Extraction (The Batch Processor)
+// 3. Step Extraction (Action Map generation)
 export const extractStepsForModule = async (
     moduleTitle,
     blueprint,
@@ -103,47 +108,69 @@ export const extractStepsForModule = async (
     courseId,
     command,
 ) => {
-    const genAI = await getGenAIClient(engineConfig.keyId);
-    const model = genAI.getGenerativeModel({
-        model: engineConfig.model,
-        generationConfig: { responseMimeType: "application/json" },
-    });
-
     const prompt = `
     Role: AI Tutor & Technical Writer.
-    Task: Generate a step-by-step interactive lesson for the module: "${moduleTitle}".
+    Task: Generate a step-by-step interactive UI lesson for the module: "${moduleTitle}".
     Course Context: ${JSON.stringify(blueprint)}
+    Refinement Command: ${command || "Focus on practical UI actions."}
 
-    Specific Command/Refinement: ${command || "Focus on practical UI actions."}
-
-    Required JSON Output Format (Array of Objects):
-    [
-        {
-            "step_type": "action_trigger", // or "dialogue"
-            "instruction_text": "Spoken instruction by AI",
-            "required_action": "left_click", // double_click, type_text, drag_and_drop
-            "ui_target": {
-                "description": "Visual description of the button/field to click",
-                "label": "Text on the element"
-            },
-            "success_state": "What happens after action"
-        }
-    ]
-
-    If it's purely theoretical, use "step_type": "dialogue" and omit ui_target.
+    Generate an array of steps. For actions, describe the target UI element vividly so a Computer Vision model can find it on screen later.
     `;
 
-    const result = await model.generateContent(prompt);
-    const steps = JSON.parse(result.response.text());
+    const responseSchema = {
+        type: Type.ARRAY,
+        items: {
+            type: Type.OBJECT,
+            properties: {
+                step_type: {
+                    type: Type.STRING,
+                    enum: ["action_trigger", "dialogue"],
+                },
+                instruction_text: { type: Type.STRING },
+                required_action: {
+                    type: Type.STRING,
+                    enum: [
+                        "left_click",
+                        "double_click",
+                        "type_text",
+                        "drag_and_drop",
+                        "none",
+                    ],
+                },
+                ui_target: {
+                    type: Type.OBJECT,
+                    properties: {
+                        description: { type: Type.STRING },
+                        label: { type: Type.STRING },
+                    },
+                },
+                success_state: { type: Type.STRING },
+            },
+            required: ["step_type", "instruction_text"],
+        },
+    };
 
-    return { steps, usage: result.response.usageMetadata };
+    const response = await ai.models.generateContent({
+        // Flash is faster for extracting steps
+        model: engineConfig.model || "gemini-3-flash-preview",
+        contents: [{ role: "user", parts: [{ text: prompt }] }],
+        config: {
+            responseMimeType: "application/json",
+            responseSchema: responseSchema,
+        },
+    });
+
+    const steps = JSON.parse(response.text);
+    return { steps, usage: response.usageMetadata };
 };
 
 // 4. Vector Ingestion (Embedding)
 export const generateEmbeddings = async (text, engineConfig) => {
-    const genAI = await getGenAIClient(engineConfig.keyId);
-    const model = genAI.getGenerativeModel({ model: "embedding-001" });
+    const response = await ai.models.embedContent({
+        // Latest Vertex AI embedding model
+        model: engineConfig.model || "text-embedding-005",
+        contents: text,
+    });
 
-    const result = await model.embedContent(text);
-    return result.embedding.values;
+    return response.embeddings[0].values;
 };

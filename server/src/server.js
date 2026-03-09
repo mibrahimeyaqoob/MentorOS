@@ -8,6 +8,7 @@ import authRoutes from './routes/authRoutes.js';
 import systemRoutes from './routes/systemRoutes.js'; // New
 import courseRoutes from './routes/courseRoutes.js'; // New
 import aiRoutes from './routes/aiRoutes.js';         // New
+import testRoutes from './routes/testRoute.js';
 
 dotenv.config();
 
@@ -27,6 +28,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/system', systemRoutes);
 app.use('/api/courses', courseRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/test', testRoutes);
 
 app.use(errorHandler);
 
