@@ -9,21 +9,6 @@ export const generateBlueprint = async (req, res, next) => {
     } catch (error) { next(error); }
 };
 
-export const batchExtract = async (req, res, next) => {
-    try {
-        const { youtubeUrl, blueprint, engineConfig } = req.body;
-
-        const result = await aiService.batchExtractUIActions(youtubeUrl, blueprint, engineConfig);
-
-        // Return the mapped steps directly
-        res.json({ 
-            success: true, 
-            stepsByModule: result.stepsByModule, 
-            metrics: { chunks: result.totalChunks, actionsFound: result.processedCount } 
-        });
-    } catch (error) { next(error); }
-};
-
 export const extractSteps = async (req, res, next) => {
     try {
         const { moduleTitle, blueprint, engineConfig, courseId, command } = req.body;

@@ -40,19 +40,36 @@ export default function CourseCreator() {
     const handleExtractAll = async () => {
         setGeneratingAll(true);
         try {
-            showToast("Initializing High-Speed Batch Extraction...", "info");
-
-            // 1. Call the new Parallel Batch Endpoint, passing the blueprint
-            const res = await api.batchExtractSteps(youtubeUrl, blueprint, engineConfig.lesson);
-
-            showToast(`Batch Complete! Found ${res.metrics.actionsFound} actions across ${res.metrics.chunks} modules.`, "success");
-
-            // 2. The backend now returns the steps perfectly mapped to the module index!
-            setModuleContents(res.stepsByModule);
-
+            const contents = {};
+            for (let i = 0; i < blueprint.modules.length; i++) {
+                showToast(`Extracting Module ${i+1}/${blueprint.modules.length}...`, "info");
+                const res = await api.extractModuleSteps(blueprint.modules[i].title, blueprint, engineConfig.lesson, "draft", "");
+                contents[i] = res.steps;
+                setModuleContents(prev => ({...prev, [i]: res.steps}));
+                // Wait 2 seconds between batch requests to avoid rate limit
+                await new Promise(r => setTimeout(r, 2000)); 
+            }
+            showToast("All modules extracted successfully!", "success");
         } catch (error) {
-            showToast("Batch Extraction Failed: " + error.message, "error");
+            showToast(error.message, "error");
         } finally { setGeneratingAll(false); }
+    };
+
+    const handlePublish = async () => {
+        setLoading(true);
+        try {
+            const data = {
+                title: blueprint.title,
+                target_audience: formData.audience,
+                blueprint: blueprint,
+                moduleContents: Object.values(moduleContents)
+            };
+            await api.saveCourseFinal(data);
+            showToast("Course Published Successfully!", "success");
+            navigate('/hq-mentor-core/dashboard');
+        } catch (error) {
+            showToast(error.message, "error");
+        } finally { setLoading(false); }
     };
 
     return (

@@ -1,156 +1,149 @@
-import { VertexAI } from '@google-cloud/vertexai';
-import { supabase } from '../config/db.js';
-import { decrypt } from '../utils/crypto.js';
+// CHANGE THIS LINE (Line 1):
+// FROM: import { GoogleGenerativeAI, SchemaType } from '@google/genai';
+// TO:
+import { GoogleGenerativeAI, SchemaType } from "@google/generative-ai";
 
-// --- 1. Initialize Vertex AI ---
-const getVertexAIClient = async (keyId) => {
-    const { data } = await supabase.from('api_keys').select('encrypted_key').eq('id', keyId).single();
-    if (!data) throw new Error("Google Cloud credentials not found.");
+import { supabase } from "../config/db.js";
+import { decrypt } from "../utils/crypto.js";
+import { YoutubeTranscript } from "youtube-transcript";
 
-    const credentialsJson = JSON.parse(decrypt(data.encrypted_key));
+// Helper to initialize GenAI with a dynamic key
+const getGenAIClient = async (keyId) => {
+    const { data } = await supabase
+        .from("api_keys")
+        .select("encrypted_key")
+        .eq("id", keyId)
+        .single();
+    if (!data) throw new Error("API Key not found or revoked.");
 
-    return new VertexAI({
-        project: credentialsJson.project_id,
-        location: 'global',
-        googleAuthOptions: {
-            credentials: {
-                client_email: credentialsJson.client_email,
-                private_key: credentialsJson.private_key
-            }
-        }
-    });
+    const apiKey = decrypt(data.encrypted_key);
+    return new GoogleGenerativeAI(apiKey);
 };
 
-// --- 2. GENERATE BLUEPRINT (Gemini 3.1 Pro) ---
-// The AI searches the URL and defines the 2-minute chunks itself!
-export const generateCourseBlueprint = async (topic, audience, engineConfig, sources) => {
-    const vertexAI = await getVertexAIClient(engineConfig.keyId);
-    const generativeModel = vertexAI.getGenerativeModel({ 
+// 1. YouTube Metadata & Transcript
+export const fetchYoutubeContext = async (url) => {
+    try {
+        // Extract ID
+        const videoId = url.split("v=")[1]?.split("&")[0];
+        if (!videoId) return { text: "", duration: 0 };
+
+        // Attempt Transcript Fetch
+        const transcriptItems =
+            await YoutubeTranscript.fetchTranscript(videoId);
+        const fullText = transcriptItems.map((item) => item.text).join(" ");
+
+        // Rough duration calc
+        const lastItem = transcriptItems[transcriptItems.length - 1];
+        const duration = (lastItem.offset + lastItem.duration) / 60; // in minutes
+
+        return { text: fullText, duration };
+    } catch (e) {
+        console.warn(
+            "Transcript fetch failed, falling back to URL only:",
+            e.message,
+        );
+        return { text: "", duration: 0 };
+    }
+};
+
+// 2. Blueprint Generation
+export const generateCourseBlueprint = async (
+    topic,
+    audience,
+    engineConfig,
+    sources,
+) => {
+    const genAI = await getGenAIClient(engineConfig.keyId);
+
+    // Updated Model instantiation
+    const model = genAI.getGenerativeModel({
         model: engineConfig.model,
         generationConfig: { responseMimeType: "application/json" },
-        // Enable Google Search to allow it to read the YouTube link context
-        tools:[{ googleSearchRetrieval: {} }]
     });
 
-    const youtubeUrl = sources.find(s => s.type === 'youtube')?.url || "No URL provided";
+    let contextData = "";
+    // Process sources (simple text concatenation for now)
+    for (const source of sources) {
+        if (source.type === "youtube") {
+            const ytData = await fetchYoutubeContext(source.url);
+            contextData += `\n[Source: YouTube Video ${source.url}]\nTranscript: ${ytData.text.substring(0, 30000)}... (truncated)\n`;
+        }
+    }
 
     const prompt = `
     Role: Senior Curriculum Architect.
-    Task: Create a structured course blueprint from this YouTube video.
-    Video URL: ${youtubeUrl}
+    Task: Create a structured course blueprint.
     Topic: ${topic}
     Audience: ${audience}
 
-    Instructions:
-    1. Analyze the video content.
-    2. Break the video down into chronological modules.
-    3. Each module should cover approximately 2 minutes of the video.
-    4. Provide the exact start_time and end_time for each module.
+    Context Data:
+    ${contextData}
 
-    Return STRICT JSON format:
+    Return JSON format:
     {
-        "title": "Course Title based on video",
-        "modules":[
-            { 
-                "title": "Module 1 Name", 
-                "objective": "What they learn",
-                "start_time": "00:00",
-                "end_time": "02:00"
-            },
-            { 
-                "title": "Module 2 Name", 
-                "objective": "What they learn",
-                "start_time": "02:00",
-                "end_time": "04:00"
-            }
+        "title": "Course Title",
+        "modules": [
+            { "title": "Module 1 Name", "objective": "What they learn" },
+            { "title": "Module 2 Name", "objective": "What they learn" }
         ]
-    }`;
+    }
+    `;
 
-    const request = { contents: [{ role: 'user', parts:[{ text: prompt }] }] };
-    const result = await generativeModel.generateContent(request);
+    const result = await model.generateContent(prompt);
+    const response = JSON.parse(result.response.text());
 
-    let textResult = result.response.candidates[0].content.parts[0].text;
-    if (textResult.startsWith('```json')) textResult = textResult.replace(/```json|```/g, '');
-
-    return { 
-        blueprint: JSON.parse(textResult), 
-        usage: result.response.usageMetadata 
-    };
+    return { blueprint: response, usage: result.response.usageMetadata };
 };
 
-// --- 3. BATCH EXTRACTOR (Gemini 3 Flash) ---
-// Takes the Blueprint modules and processes them in parallel!
-export const batchExtractUIActions = async (youtubeUrl, blueprint, engineConfig) => {
-    const vertexAI = await getVertexAIClient(engineConfig.keyId);
-    const model = vertexAI.getGenerativeModel({ 
-        model: engineConfig.model, 
+// 3. Step Extraction (The Batch Processor)
+export const extractStepsForModule = async (
+    moduleTitle,
+    blueprint,
+    engineConfig,
+    courseId,
+    command,
+) => {
+    const genAI = await getGenAIClient(engineConfig.keyId);
+    const model = genAI.getGenerativeModel({
+        model: engineConfig.model,
         generationConfig: { responseMimeType: "application/json" },
-        tools:[{ googleSearchRetrieval: {} }]
     });
 
-    const modules = blueprint.modules ||[];
-    console.log(`⚡ Starting Parallel Extraction for ${modules.length} modules...`);
+    const prompt = `
+    Role: AI Tutor & Technical Writer.
+    Task: Generate a step-by-step interactive lesson for the module: "${moduleTitle}".
+    Course Context: ${JSON.stringify(blueprint)}
 
-    // Worker function for a single module
-    const processModule = async (module, index) => {
-        const prompt = `
-        Role: AI Technical Writer & UI Analyzer.
-        Task: Extract physical UI actions (clicks, types, drags) from the provided YouTube video.
-        Video URL: ${youtubeUrl}
+    Specific Command/Refinement: ${command || "Focus on practical UI actions."}
 
-        CRITICAL: ONLY analyze the video between ${module.start_time} and ${module.end_time}.
-        Module Topic: ${module.title}
-
-        Return JSON Array (Strict):[
-            {
-                "step_type": "action_trigger",
-                "instruction_text": "Spoken instruction to the user",
-                "required_action": "left_click",
-                "ui_target": { "label": "Button/Element Name", "description": "Visual location on screen" },
-                "success_state": "What happens next"
-            }
-        ]
-        If it's just theory with no UI actions, return a "dialogue" step. If nothing happens, return[].
-        `;
-
-        try {
-            const result = await model.generateContent({ contents: [{ role: 'user', parts: [{ text: prompt }] }] });
-            let text = result.response.candidates[0].content.parts[0].text;
-            if (text.startsWith('```json')) text = text.replace(/```json|```/g, '');
-            return JSON.parse(text);
-        } catch (err) {
-            console.error(`Module ${index + 1} extraction failed:`, err.message);
-            return[]; // Return empty so we don't break the whole batch
+    Required JSON Output Format (Array of Objects):
+    [
+        {
+            "step_type": "action_trigger", // or "dialogue"
+            "instruction_text": "Spoken instruction by AI",
+            "required_action": "left_click", // double_click, type_text, drag_and_drop
+            "ui_target": {
+                "description": "Visual description of the button/field to click",
+                "label": "Text on the element"
+            },
+            "success_state": "What happens after action"
         }
-    };
+    ]
 
-    // Execute all module extractions in parallel
-    const results = await Promise.all(modules.map((mod, i) => processModule(mod, i)));
+    If it's purely theoretical, use "step_type": "dialogue" and omit ui_target.
+    `;
 
-    // Results is an array of arrays (each module's steps). 
-    // We return it exactly like this so the frontend can map it directly to the modules.
-    const stepsByModule = {};
-    let totalActions = 0;
+    const result = await model.generateContent(prompt);
+    const steps = JSON.parse(result.response.text());
 
-    results.forEach((moduleSteps, idx) => {
-        stepsByModule[idx] = moduleSteps;
-        totalActions += moduleSteps.length;
-    });
-
-    return { 
-        stepsByModule, 
-        totalChunks: modules.length, 
-        processedCount: totalActions 
-    };
+    return { steps, usage: result.response.usageMetadata };
 };
 
-// --- 4. Embeddings ---
+// 4. Vector Ingestion (Embedding)
 export const generateEmbeddings = async (text, engineConfig) => {
-    const vertexAI = await getVertexAIClient(engineConfig.keyId);
-    const model = engineConfig.model || 'text-embedding-005';
+    const genAI = await getGenAIClient(engineConfig.keyId);
+    const model = genAI.getGenerativeModel({ model: "embedding-001" });
 
-    const embeddingModel = vertexAI.getGenerativeModel({ model: model });
-    const result = await embeddingModel.embedContent({ content: { parts: [{ text }] } });
-
+    const result = await model.embedContent(text);
     return result.embedding.values;
 };

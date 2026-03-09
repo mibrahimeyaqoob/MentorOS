@@ -192,15 +192,7 @@
                 });
                 return res; // { steps, usage }
             },
-            
-            // 3.5. NEW Batch Extractor
-            batchExtractSteps: async (youtubeUrl, blueprint, engineConfig) => {
-                const res = await fetchAPI('/api/ai/batch-extract', {
-                    method: 'POST',
-                    body: JSON.stringify({ youtubeUrl, blueprint, engineConfig })
-                });
-                return res; 
-            },
+
             // 4. Knowledge Ingestion (Vectorization)
             ingestKnowledge: async (courseId, engineConfig, sources, embedderConfig) => {
                 return await fetchAPI('/api/ai/ingest', {
