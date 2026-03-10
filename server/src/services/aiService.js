@@ -1,82 +1,67 @@
 import { GoogleGenAI, Type } from "@google/genai";
-import { supabase } from "../config/db.js";
 
-// 🚀 PRODUCTION AUTHENTICATION:
-// The SDK automatically uses the GOOGLE_APPLICATION_CREDENTIALS environment variable.
-// No more passing API keys manually!
+// 🚀 PRODUCTION AUTHENTICATION: Uses GOOGLE_APPLICATION_CREDENTIALS
 const ai = new GoogleGenAI({
     vertexai: true,
     project: process.env.GOOGLE_CLOUD_PROJECT,
     location: process.env.GOOGLE_CLOUD_LOCATION || "us-central1",
 });
 
-// 1. YouTube Metadata (Native URL passing)
-export const fetchYoutubeContext = async (url) => {
-    return { url: url };
-};
-
-// 2. Blueprint Generation (Direct YouTube Processing)
+// 1. Generate Blueprint with Context (YouTube + Files)
 export const generateCourseBlueprint = async (
     topic,
     audience,
     engineConfig,
-    sources,
+    youtubeUrl,
+    files,
 ) => {
     const parts = [];
-    for (const source of sources) {
-        if (source.type === "youtube") {
-            parts.push({
-                fileData: {
-                    fileUri: source.url,
-                    mimeType: "video/mp4",
-                },
-            });
-        }
+
+    // Add YouTube Video if provided
+    if (youtubeUrl && youtubeUrl.trim() !== "") {
+        parts.push({
+            fileData: { fileUri: youtubeUrl, mimeType: "video/mp4" },
+        });
+    }
+
+    // Add Context Files (PDFs, TXT, etc)
+    for (const file of files) {
+        parts.push({
+            inlineData: {
+                data: file.buffer.toString("base64"),
+                mimeType: file.mimetype,
+            },
+        });
     }
 
     parts.push({
         text: `
         Role: Senior Curriculum Architect.
-        Task: Create a structured course blueprint from the provided video.
+        Task: Create a structured course blueprint.
         Topic: ${topic}
         Audience: ${audience}
 
         Instructions:
-        1. Watch the attached YouTube video.
-        2. Break the video down into chronological modules.
-        3. Each module MUST be roughly 2-minutes long.
-        4. Extract the core objective of what the instructor is doing in that chunk.
+        1. Analyze the attached video and documents.
+        2. Break the content down into chronological modules.
+        3. STRICT RULE: Each module MUST represent roughly a 2-minute chunk of time (e.g., 00:00 - 02:00, 02:00 - 04:00).
+        4. Extract the core objective of what the instructor is doing in that 2-minute chunk.
         `,
     });
 
     const responseSchema = {
         type: Type.OBJECT,
         properties: {
-            title: {
-                type: Type.STRING,
-                description: "The overarching title of the course",
-            },
+            title: { type: Type.STRING },
             modules: {
                 type: Type.ARRAY,
                 items: {
                     type: Type.OBJECT,
                     properties: {
-                        start_time: {
-                            type: Type.STRING,
-                            description: "e.g., 00:00",
-                        },
-                        end_time: {
-                            type: Type.STRING,
-                            description: "e.g., 02:00",
-                        },
-                        title: {
-                            type: Type.STRING,
-                            description: "Module Title",
-                        },
-                        objective: {
-                            type: Type.STRING,
-                            description: "What the user will learn to do",
-                        },
+                        start_time: { type: Type.STRING },
+                        end_time: { type: Type.STRING },
+                        title: { type: Type.STRING },
+                        objective: { type: Type.STRING },
                     },
                     required: ["start_time", "end_time", "title", "objective"],
                 },
@@ -86,7 +71,6 @@ export const generateCourseBlueprint = async (
     };
 
     const response = await ai.models.generateContent({
-        // Uses the model selected in the UI frontend routing matrix, defaults to Pro
         model: engineConfig.model || "gemini-3.1-pro-preview",
         contents: [{ role: "user", parts: parts }],
         config: {
@@ -96,11 +80,43 @@ export const generateCourseBlueprint = async (
         },
     });
 
-    const blueprint = JSON.parse(response.text);
-    return { blueprint, usage: response.usageMetadata };
+    return {
+        blueprint: JSON.parse(response.text),
+        usage: response.usageMetadata,
+    };
 };
 
-// 3. Step Extraction (Action Map generation)
+// 2. Refine Blueprint (AI Assisted Editing)
+export const refineCourseBlueprint = async (
+    currentBlueprint,
+    prompt,
+    engineConfig,
+) => {
+    const response = await ai.models.generateContent({
+        model: engineConfig.model || "gemini-3.1-pro-preview",
+        contents: [
+            {
+                role: "user",
+                parts: [
+                    {
+                        text: `
+            Here is a course blueprint: ${JSON.stringify(currentBlueprint)}
+            The admin requested this change: "${prompt}"
+            Apply the change and return the full updated JSON blueprint in the exact same schema structure.
+        `,
+                    },
+                ],
+            },
+        ],
+        config: {
+            responseMimeType: "application/json",
+            thinkingConfig: { thinkingLevel: "LOW" },
+        },
+    });
+    return { blueprint: JSON.parse(response.text) };
+};
+
+// 3. Extract Module Steps
 export const extractStepsForModule = async (
     moduleTitle,
     blueprint,
@@ -110,11 +126,9 @@ export const extractStepsForModule = async (
 ) => {
     const prompt = `
     Role: AI Tutor & Technical Writer.
-    Task: Generate a step-by-step interactive UI lesson for the module: "${moduleTitle}".
+    Task: Generate an interactive UI lesson map for the module: "${moduleTitle}".
     Course Context: ${JSON.stringify(blueprint)}
     Refinement Command: ${command || "Focus on practical UI actions."}
-
-    Generate an array of steps. For actions, describe the target UI element vividly so a Computer Vision model can find it on screen later.
     `;
 
     const responseSchema = {
@@ -151,7 +165,6 @@ export const extractStepsForModule = async (
     };
 
     const response = await ai.models.generateContent({
-        // Flash is faster for extracting steps
         model: engineConfig.model || "gemini-3-flash-preview",
         contents: [{ role: "user", parts: [{ text: prompt }] }],
         config: {
@@ -160,17 +173,28 @@ export const extractStepsForModule = async (
         },
     });
 
-    const steps = JSON.parse(response.text);
-    return { steps, usage: response.usageMetadata };
+    return { steps: JSON.parse(response.text), usage: response.usageMetadata };
 };
 
-// 4. Vector Ingestion (Embedding)
-export const generateEmbeddings = async (text, engineConfig) => {
-    const response = await ai.models.embedContent({
-        // Latest Vertex AI embedding model
-        model: engineConfig.model || "text-embedding-005",
-        contents: text,
+// 4. Refine Extracted Steps (AI Assisted Editing)
+export const refineModuleSteps = async (currentSteps, prompt, engineConfig) => {
+    const response = await ai.models.generateContent({
+        model: engineConfig.model || "gemini-3-flash-preview",
+        contents: [
+            {
+                role: "user",
+                parts: [
+                    {
+                        text: `
+            Here are the current UI action steps: ${JSON.stringify(currentSteps)}
+            The admin requested this change: "${prompt}"
+            Apply the change and return the updated JSON array. Keep the same schema.
+        `,
+                    },
+                ],
+            },
+        ],
+        config: { responseMimeType: "application/json" },
     });
-
-    return response.embeddings[0].values;
+    return { steps: JSON.parse(response.text) };
 };

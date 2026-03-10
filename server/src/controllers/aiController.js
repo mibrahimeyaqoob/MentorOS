@@ -3,11 +3,23 @@ import { supabase } from '../config/db.js';
 
 export const generateBlueprint = async (req, res, next) => {
     try {
-        const { topic, audience, engineConfig, knowledgeSources } = req.body;
-        const result = await aiService.generateCourseBlueprint(topic, audience, engineConfig, knowledgeSources);
+        // Since we use FormData on the frontend now, data comes in req.body as strings
+        const { topic, audience, engineConfig, youtubeUrl } = req.body;
+        const parsedConfig = JSON.parse(engineConfig);
+        const files = req.files ||[];
+
+        const result = await aiService.generateCourseBlueprint(topic, audience, parsedConfig, youtubeUrl, files);
         res.json({ success: true, blueprint: result.blueprint, usage: result.usage });
     } catch (error) { next(error); }
 };
+
+export const refineBlueprint = async (req, res, next) => {
+    try {
+        const { currentBlueprint, prompt, engineConfig } = req.body;
+        const result = await aiService.refineCourseBlueprint(currentBlueprint, prompt, engineConfig);
+        res.json({ success: true, blueprint: result.blueprint });
+    } catch (error) { next(error); }
+}
 
 export const extractSteps = async (req, res, next) => {
     try {
@@ -17,44 +29,24 @@ export const extractSteps = async (req, res, next) => {
     } catch (error) { next(error); }
 };
 
+export const refineSteps = async (req, res, next) => {
+    try {
+        const { currentSteps, prompt, engineConfig } = req.body;
+        const result = await aiService.refineModuleSteps(currentSteps, prompt, engineConfig);
+        res.json({ success: true, steps: result.steps });
+    } catch (error) { next(error); }
+}
+
 export const getYoutubeMeta = async (req, res, next) => {
     try {
         const { url } = req.body;
-        const data = await aiService.fetchYoutubeContext(url);
-        res.json({ success: true, metadata: { duration: data.duration * 60, title: "Video Found" } }); // Simple mock title for now
+        res.json({ success: true, metadata: { duration: 0, title: "Ready for Native Vertex Processing" } }); 
     } catch (error) { next(error); }
 };
 
 export const ingestKnowledge = async (req, res, next) => {
     try {
-        const { courseId, engineConfig, sources, embedderConfig } = req.body;
-
-        let chunksProcessed = 0;
-
-        for (const source of sources) {
-            let contentToEmbed = "";
-            if (source.type === 'youtube') {
-                const yt = await aiService.fetchYoutubeContext(source.url);
-                contentToEmbed = yt.text;
-            }
-
-            // Chunking logic (simplified for now: 1000 chars)
-            const chunks = contentToEmbed.match(/.{1,1000}/g) || [];
-
-            for (const chunk of chunks) {
-                const embedding = await aiService.generateEmbeddings(chunk, embedderConfig);
-
-                await supabase.from('knowledge_chunks').insert({
-                    course_id: courseId,
-                    source_name: source.name,
-                    source_type: source.type,
-                    content: chunk,
-                    embedding: embedding
-                });
-                chunksProcessed++;
-            }
-        }
-
-        res.json({ success: true, chunks: chunksProcessed });
+        // Simplified for now - will be expanded when we build Vector Brain fully
+        res.json({ success: true, chunks: 0 });
     } catch (error) { next(error); }
 };
