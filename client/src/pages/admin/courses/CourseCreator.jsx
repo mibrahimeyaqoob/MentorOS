@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useLocation } from "react-router-dom";
 import { api } from "../../../services/api";
 import { useToast } from "../../../contexts/ToastContext";
 import {
@@ -24,35 +24,109 @@ import {
 export default function CourseCreator() {
     const { id } = useParams();
     const navigate = useNavigate();
+    const location = useLocation();
     const { showToast } = useToast();
 
-    // Core State
+    // --- CORE STATE ---
+    const [courseId, setCourseId] = useState(id || null); // DB Tracking ID
     const [step, setStep] = useState(1);
     const [formData, setFormData] = useState({ topic: "", audience: "" });
     const [youtubeUrl, setYoutubeUrl] = useState("");
     const [files, setFiles] = useState([]);
     const fileInputRef = useRef(null);
 
-    // AI Data State
+    // --- AI DATA STATE ---
     const [blueprint, setBlueprint] = useState(null);
     const [moduleContents, setModuleContents] = useState({});
     const [activeModuleIdx, setActiveModuleIdx] = useState(0);
 
-    // Refinement Prompts
+    // --- REFINEMENT PROMPTS ---
     const [blueprintPrompt, setBlueprintPrompt] = useState("");
     const [stepPrompt, setStepPrompt] = useState("");
 
-    // System State
+    // --- SYSTEM STATE ---
     const [loading, setLoading] = useState(false);
     const [generatingAll, setGeneratingAll] = useState(false);
     const [engineConfig, setEngineConfig] = useState(null);
 
+    // --- AUTO-SAVE TRACKING ---
+    const [isSaving, setIsSaving] = useState(false);
+    const [lastSaved, setLastSaved] = useState(null);
+
+    // 1. Initial Load: Routing Config & Existing Course Data
     useEffect(() => {
-        // Load routing config so we know which models to use
         api.getRouting()
-            .then((res) => setEngineConfig(res))
+            .then((res) => {
+                // FIX: Extract the 'routing' object specifically from the new multi-provider structure
+                if (res && res.routing) {
+                    setEngineConfig(res.routing);
+                } else {
+                    setEngineConfig(res);
+                }
+            })
             .catch((e) => console.error(e));
-    }, []);
+
+        if (id) {
+            setLoading(true);
+            api.getCourse(id)
+                .then((res) => {
+                    setFormData({
+                        topic: res.title,
+                        audience: res.target_audience,
+                    });
+                    setBlueprint(res.blueprint);
+
+                    const loadedContents = {};
+                    res.course_modules.forEach((mod, idx) => {
+                        const mIdx = mod.sequence_number - 1;
+                        loadedContents[mIdx] = mod.content;
+                    });
+                    setModuleContents(loadedContents);
+                    setStep(3);
+                })
+                .catch((e) => showToast("Failed to load course", "error"))
+                .finally(() => setLoading(false));
+        }
+    }, [id]);
+
+    // 2. 🔥 THE AUTO-SAVE ENGINE 🔥
+    // Triggers automatically whenever core data changes, but debounces for 3 seconds
+    useEffect(() => {
+        if (!blueprint) return; // Don't save empty states
+
+        const autoSaveTimer = setTimeout(async () => {
+            setIsSaving(true);
+            try {
+                const data = {
+                    id: courseId,
+                    title: blueprint.title || formData.topic,
+                    target_audience: formData.audience,
+                    blueprint: blueprint,
+                    moduleContents: moduleContents,
+                };
+
+                const res = await api.saveCourseDraft(data);
+
+                // If it's a brand new draft, update URL silently so it doesn't duplicate
+                if (!courseId) {
+                    setCourseId(res.courseId);
+                    window.history.replaceState(
+                        null,
+                        "",
+                        `/hq-mentor-core/course-creator/${res.courseId}`,
+                    );
+                }
+
+                setLastSaved(new Date());
+            } catch (err) {
+                console.error("Auto-save failed", err);
+            } finally {
+                setIsSaving(false);
+            }
+        }, 3000);
+
+        return () => clearTimeout(autoSaveTimer);
+    }, [blueprint, moduleContents, formData, courseId]);
 
     // --- FILE HANDLING ---
     const handleFileDrop = (e) => {
@@ -85,7 +159,7 @@ export default function CourseCreator() {
             const res = await api.generateBlueprint(
                 formData.topic,
                 formData.audience,
-                engineConfig.architect,
+                engineConfig,
                 youtubeUrl,
                 files,
             );
@@ -125,23 +199,24 @@ export default function CourseCreator() {
         try {
             const newContents = { ...moduleContents };
             for (let i = 0; i < blueprint.modules.length; i++) {
-                if (newContents[i]) continue; // Skip if already extracted
+                if (newContents[i] || blueprint.modules[i].is_static) continue; // Skip if extracted or if it's a static career module
 
                 showToast(
                     `Extracting Module ${i + 1}/${blueprint.modules.length}...`,
                     "info",
                 );
+                // Uses the extraction engine assigned in the Command Center
                 const res = await api.extractModuleSteps(
                     blueprint.modules[i].title,
                     blueprint,
                     engineConfig.lesson,
-                    "draft",
+                    courseId || "draft",
                     "",
                 );
                 newContents[i] = res.steps;
                 setModuleContents({ ...newContents }); // Force render
 
-                // Anti-Rate-Limit delay (2 seconds)
+                // 2-second anti-rate-limit delay (Will be replaced by BullMQ later)
                 await new Promise((r) => setTimeout(r, 2000));
             }
             setStep(3);
@@ -197,13 +272,9 @@ export default function CourseCreator() {
     const handlePublish = async () => {
         setLoading(true);
         try {
-            const data = {
-                title: blueprint.title,
-                target_audience: formData.audience,
-                blueprint: blueprint,
-                moduleContents: Object.values(moduleContents),
-            };
-            await api.saveCourseFinal(data);
+            // Because auto-save is running, the data is already in the DB.
+            // We just need to flip the status column from 'draft' to 'published'.
+            await api.publishCourse(courseId);
             showToast("Course Published to Fleet!", "success");
             navigate("/hq-mentor-core/dashboard");
         } catch (error) {
@@ -214,11 +285,29 @@ export default function CourseCreator() {
     };
 
     return (
-        <div className="max-w-6xl mx-auto py-8 animate-in fade-in duration-500">
+        <div className="max-w-6xl mx-auto py-8 animate-in fade-in duration-500 relative">
+            {/* AUTO-SAVE STATUS INDICATOR (Top Right) */}
+            <div className="absolute top-2 right-4 flex items-center gap-2 text-xs font-bold text-gray-400">
+                {isSaving ? (
+                    <>
+                        <Loader2
+                            size={12}
+                            className="animate-spin text-indigo-500"
+                        />{" "}
+                        Saving draft...
+                    </>
+                ) : lastSaved ? (
+                    <>
+                        <CheckCircle2 size={12} className="text-emerald-500" />{" "}
+                        Saved {lastSaved.toLocaleTimeString()}
+                    </>
+                ) : null}
+            </div>
+
             {/* PROGRESS BAR */}
             <div className="flex items-center justify-between mb-8 relative px-4 max-w-2xl mx-auto">
                 <div className="absolute top-5 left-0 w-full h-0.5 bg-gray-200 -z-0"></div>
-                {[1, 2, 3].map((s, idx) => (
+                {[1, 2, 3].map((s) => (
                     <div
                         key={s}
                         className={`z-10 flex items-center justify-center w-10 h-10 rounded-full font-bold transition-all shadow-sm ${step >= s ? "bg-indigo-600 text-white" : "bg-white border-2 border-gray-200 text-gray-400"}`}
@@ -392,7 +481,7 @@ export default function CourseCreator() {
                                                 {m.title}
                                             </h3>
 
-                                            {/* UI Badges for the new Features */}
+                                            {/* UI Badges for Advanced Sourcing */}
                                             {m.is_supplementary && (
                                                 <span className="bg-blue-100 text-blue-700 text-[10px] px-2 py-0.5 rounded font-bold uppercase tracking-widest flex items-center gap-1">
                                                     <Sparkles size={10} />{" "}
@@ -409,7 +498,7 @@ export default function CourseCreator() {
                                             {m.objective}
                                         </p>
 
-                                        {/* Show URL if the AI found a supplementary video */}
+                                        {/* Display the YouTube URL if AI auto-searched it */}
                                         {m.supplementary_url && (
                                             <a
                                                 href={m.supplementary_url}
@@ -442,7 +531,7 @@ export default function CourseCreator() {
                                 <div className="flex gap-2">
                                     <input
                                         type="text"
-                                        placeholder="e.g. Combine module 2 and 3 into a single 4-minute chunk"
+                                        placeholder="e.g. Combine module 2 and 3 into a single chunk"
                                         className="flex-1 bg-white border border-indigo-200 p-2.5 rounded-lg text-sm outline-none focus:border-indigo-500"
                                         value={blueprintPrompt}
                                         onChange={(e) =>
@@ -562,7 +651,23 @@ export default function CourseCreator() {
                         </div>
 
                         <div className="flex-1 overflow-y-auto p-6 bg-[#f8fafc]">
-                            {!moduleContents[activeModuleIdx] ? (
+                            {blueprint.modules[activeModuleIdx]?.is_static ? (
+                                <div className="h-full flex flex-col items-center justify-center text-amber-600 font-bold p-10 text-center">
+                                    <Sparkles
+                                        size={40}
+                                        className="mb-4 text-amber-400"
+                                    />
+                                    <p>
+                                        This is a Static Career Launchpad
+                                        Module.
+                                    </p>
+                                    <p className="text-sm font-medium mt-2 text-gray-500">
+                                        It does not require UI action
+                                        extraction. It will act as a standard
+                                        lesson in the Student Portal.
+                                    </p>
+                                </div>
+                            ) : !moduleContents[activeModuleIdx] ? (
                                 <div className="h-full flex items-center justify-center text-gray-400 font-bold">
                                     Extraction pending for this module...
                                 </div>
@@ -695,6 +800,14 @@ export default function CourseCreator() {
                                                                             Type
                                                                             Text
                                                                         </option>
+                                                                        <option value="drag_and_drop">
+                                                                            Drag
+                                                                            &
+                                                                            Drop
+                                                                        </option>
+                                                                        <option value="none">
+                                                                            None
+                                                                        </option>
                                                                     </select>
                                                                 </div>
                                                                 <div className="flex-1">
@@ -734,46 +847,51 @@ export default function CourseCreator() {
                         </div>
 
                         {/* AI Edit Bar for Steps */}
-                        {moduleContents[activeModuleIdx] && (
-                            <div className="p-4 border-t bg-white">
-                                <div className="bg-indigo-50 border border-indigo-100 p-3 rounded-xl flex gap-3">
-                                    <Wand2
-                                        className="text-indigo-500 shrink-0 mt-2"
-                                        size={20}
-                                    />
-                                    <div className="flex-1 flex gap-2">
-                                        <input
-                                            type="text"
-                                            placeholder="AI Command: Make instructions more friendly..."
-                                            className="flex-1 bg-white border border-indigo-200 p-2.5 rounded-lg text-sm outline-none focus:border-indigo-500"
-                                            value={stepPrompt}
-                                            onChange={(e) =>
-                                                setStepPrompt(e.target.value)
-                                            }
-                                            onKeyDown={(e) =>
-                                                e.key === "Enter" &&
-                                                handleRefineSteps()
-                                            }
-                                            disabled={loading}
+                        {moduleContents[activeModuleIdx] &&
+                            !blueprint.modules[activeModuleIdx]?.is_static && (
+                                <div className="p-4 border-t bg-white">
+                                    <div className="bg-indigo-50 border border-indigo-100 p-3 rounded-xl flex gap-3">
+                                        <Wand2
+                                            className="text-indigo-500 shrink-0 mt-2"
+                                            size={20}
                                         />
-                                        <button
-                                            onClick={handleRefineSteps}
-                                            disabled={loading || !stepPrompt}
-                                            className="bg-indigo-600 text-white px-5 rounded-lg text-sm font-bold hover:bg-indigo-700 disabled:opacity-50"
-                                        >
-                                            {loading ? (
-                                                <Loader2
-                                                    size={16}
-                                                    className="animate-spin"
-                                                />
-                                            ) : (
-                                                "Revise"
-                                            )}
-                                        </button>
+                                        <div className="flex-1 flex gap-2">
+                                            <input
+                                                type="text"
+                                                placeholder="AI Command: Make instructions more friendly..."
+                                                className="flex-1 bg-white border border-indigo-200 p-2.5 rounded-lg text-sm outline-none focus:border-indigo-500"
+                                                value={stepPrompt}
+                                                onChange={(e) =>
+                                                    setStepPrompt(
+                                                        e.target.value,
+                                                    )
+                                                }
+                                                onKeyDown={(e) =>
+                                                    e.key === "Enter" &&
+                                                    handleRefineSteps()
+                                                }
+                                                disabled={loading}
+                                            />
+                                            <button
+                                                onClick={handleRefineSteps}
+                                                disabled={
+                                                    loading || !stepPrompt
+                                                }
+                                                className="bg-indigo-600 text-white px-5 rounded-lg text-sm font-bold hover:bg-indigo-700 disabled:opacity-50"
+                                            >
+                                                {loading ? (
+                                                    <Loader2
+                                                        size={16}
+                                                        className="animate-spin"
+                                                    />
+                                                ) : (
+                                                    "Revise"
+                                                )}
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
-                            </div>
-                        )}
+                            )}
                     </div>
                 </div>
             )}
