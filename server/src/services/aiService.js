@@ -1,53 +1,104 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type } from '@google/genai';
+import { AnthropicVertex } from '@anthropic-ai/vertex-sdk';
+import pRetry from 'p-retry';
+import { supabase } from '../config/db.js';
 
-// 🚀 PRODUCTION AUTHENTICATION: Uses GOOGLE_APPLICATION_CREDENTIALS
-const ai = new GoogleGenAI({
-    vertexai: true,
-    project: process.env.GOOGLE_CLOUD_PROJECT,
-    location: process.env.GOOGLE_CLOUD_LOCATION || "us-central1",
-});
+// ============================================================================
+// 1. THE MULTI-PROVIDER AI ROUTER
+// ============================================================================
+const callAI = async (engineConfig, prompt, systemInstruction = null, responseSchema = null, files =[]) => {
+    const provider = engineConfig.provider || 'google';
+    const modelId = engineConfig.model;
 
-// 1. Generate Blueprint with Context (YouTube + Files)
-export const generateCourseBlueprint = async (
-    topic,
-    audience,
-    engineConfig,
-    youtubeUrl,
-    files,
-) => {
-    const parts = [];
+    console.log(`[AI Router] Routing task to ${provider.toUpperCase()} model: ${modelId}`);
 
-    // Add YouTube Video if provided
-    if (youtubeUrl && youtubeUrl.trim() !== "") {
-        parts.push({
-            fileData: { fileUri: youtubeUrl, mimeType: "video/mp4" },
+    // --- GOOGLE GEMINI VIA VERTEX AI ---
+    if (provider === 'google') {
+        const ai = new GoogleGenAI({ vertexai: true, project: process.env.GOOGLE_CLOUD_PROJECT, location: process.env.GOOGLE_CLOUD_LOCATION });
+
+        const parts = [{ text: prompt }];
+        if (files.length > 0) parts.unshift(...files);
+
+        const config = { thinkingConfig: { thinkingLevel: 'HIGH' } }; // Default config
+        if (systemInstruction) config.systemInstruction = systemInstruction;
+        if (responseSchema) {
+            config.responseMimeType = "application/json";
+            config.responseSchema = responseSchema;
+        }
+
+        const response = await ai.models.generateContent({
+            model: modelId,
+            contents: [{ role: 'user', parts }],
+            config
         });
+
+        return { text: response.text, usage: response.usageMetadata };
+    } 
+
+    // --- ANTHROPIC CLAUDE VIA VERTEX AI ---
+    else if (provider === 'anthropic') {
+        const client = new AnthropicVertex({ projectId: process.env.GOOGLE_CLOUD_PROJECT, region: process.env.GOOGLE_CLOUD_LOCATION });
+
+        // Note: Claude handles JSON structuring via 'tools' or strict prompting. 
+        // For this abstraction, we enforce JSON via system prompt if a schema is provided.
+        let finalSystem = systemInstruction || "";
+        if (responseSchema) {
+            finalSystem += `\n\nYou MUST return your response as valid JSON matching this schema: ${JSON.stringify(responseSchema)}`;
+        }
+
+        const response = await client.messages.create({
+            model: modelId,
+            max_tokens: 8192,
+            system: finalSystem,
+            messages: [{ role: 'user', content: prompt }]
+        });
+
+        return { text: response.content[0].text, usage: response.usage };
     }
 
-    // Add Context Files (PDFs, TXT, etc)
-    for (const file of files) {
-        parts.push({
-            inlineData: {
-                data: file.buffer.toString("base64"),
-                mimeType: file.mimetype,
-            },
-        });
-    }
+    throw new Error(`Unsupported AI Provider: ${provider}`);
+};
 
-    parts.push({
-        text: `
-        Role: Senior Curriculum Architect.
-        Task: Create a structured course blueprint.
-        Topic: ${topic}
-        Audience: ${audience}
+// ============================================================================
+// 2. DYNAMIC YOUTUBE SEARCHER (No hardcoded models)
+// ============================================================================
+const findSupplementaryVideo = async (searchQuery, searcherConfig) => {
+    // Only Gemini supports the native Google Search tool currently
+    const ai = new GoogleGenAI({ vertexai: true, project: process.env.GOOGLE_CLOUD_PROJECT, location: process.env.GOOGLE_CLOUD_LOCATION });
 
-        Instructions:
-        1. Analyze the attached video and documents.
-        2. Break the content down into chronological modules.
-        3. STRICT RULE: Each module MUST represent roughly a 2-minute chunk of time (e.g., 00:00 - 02:00, 02:00 - 04:00).
-        4. Extract the core objective of what the instructor is doing in that 2-minute chunk.
-        `,
+    const response = await ai.models.generateContent({
+        model: searcherConfig.model || 'gemini-3.1-pro-preview',
+        contents: `Find the best YouTube tutorial for: "${searchQuery}". Return ONLY the raw YouTube URL.`,
+        config: { tools: [{ googleSearch: {} }], temperature: 0.1 }
     });
+    return response.text.trim();
+};
+
+// ============================================================================
+// 3. THE ARCHITECT (Dynamic Provider Injection)
+// ============================================================================
+export const generateCourseBlueprint = async (topic, audience, routingConfig, youtubeUrl, fileUploads) => {
+    const architectConfig = routingConfig.architect;
+    const searcherConfig = routingConfig.searcher; // New explicit searcher role
+
+    const files =[];
+    if (youtubeUrl) files.push({ fileData: { fileUri: youtubeUrl, mimeType: "video/mp4" } });
+    for (const file of fileUploads) {
+        files.push({ inlineData: { data: file.buffer.toString("base64"), mimeType: file.mimetype } });
+    }
+
+    const prompt = `
+    Topic: ${topic}
+    Audience: ${audience}
+
+    STRICT STRUCTURAL RULES:
+    1. Module 1 MUST be "Introduction & Overview".
+    2. Module 2 MUST be "Environment Setup". If not in video, set "needs_search" to true with a "search_query".
+    3. Core Content MUST be EXACTLY 1-MINUTE CHUNKS (e.g., 00:00-01:00).
+    4. Final module MUST be an "Industrial-Level Capstone Project". If not in video, set "needs_search" to true.
+    `;
+
+    const systemInstruction = "You are a Senior Curriculum Architect. You must output perfectly valid JSON.";
 
     const responseSchema = {
         type: Type.OBJECT,
@@ -58,143 +109,62 @@ export const generateCourseBlueprint = async (
                 items: {
                     type: Type.OBJECT,
                     properties: {
-                        start_time: { type: Type.STRING },
-                        end_time: { type: Type.STRING },
-                        title: { type: Type.STRING },
-                        objective: { type: Type.STRING },
+                        start_time: { type: Type.STRING }, end_time: { type: Type.STRING },
+                        title: { type: Type.STRING }, objective: { type: Type.STRING },
+                        needs_search: { type: Type.BOOLEAN }, search_query: { type: Type.STRING }
                     },
-                    required: ["start_time", "end_time", "title", "objective"],
-                },
-            },
+                    required: ["title", "objective", "needs_search"]
+                }
+            }
         },
-        required: ["title", "modules"],
+        required: ["title", "modules"]
     };
 
-    const response = await ai.models.generateContent({
-        model: engineConfig.model || "gemini-3.1-pro-preview",
-        contents: [{ role: "user", parts: parts }],
-        config: {
-            responseMimeType: "application/json",
-            responseSchema: responseSchema,
-            thinkingConfig: { thinkingLevel: "HIGH" },
-        },
-    });
+    // CALL THE DYNAMIC ROUTER
+    const result = await callAI(architectConfig, prompt, systemInstruction, responseSchema, files);
+    let blueprint = JSON.parse(result.text);
 
-    return {
-        blueprint: JSON.parse(response.text),
-        usage: response.usageMetadata,
-    };
+    // Dynamic Search Loop
+    for (let i = 0; i < blueprint.modules.length; i++) {
+        if (blueprint.modules[i].needs_search && blueprint.modules[i].search_query) {
+            try {
+                const foundUrl = await pRetry(() => findSupplementaryVideo(blueprint.modules[i].search_query, searcherConfig), { retries: 2 });
+                blueprint.modules[i].supplementary_url = foundUrl;
+                blueprint.modules[i].start_time = "00:00"; blueprint.modules[i].end_time = "10:00"; blueprint.modules[i].is_supplementary = true;
+            } catch (err) { console.error("Search failed."); }
+        }
+    }
+
+    // Append Career Launchpad
+    blueprint.modules.push(
+        { title: "Career: Tech Resume Building", objective: "Tailor a resume.", is_static: true },
+        { title: "Career: Interview Prep", objective: "Common questions.", is_static: true }
+    );
+
+    return { blueprint, usage: result.usage };
 };
 
-// 2. Refine Blueprint (AI Assisted Editing)
-export const refineCourseBlueprint = async (
-    currentBlueprint,
-    prompt,
-    engineConfig,
-) => {
-    const response = await ai.models.generateContent({
-        model: engineConfig.model || "gemini-3.1-pro-preview",
-        contents: [
-            {
-                role: "user",
-                parts: [
-                    {
-                        text: `
-            Here is a course blueprint: ${JSON.stringify(currentBlueprint)}
-            The admin requested this change: "${prompt}"
-            Apply the change and return the full updated JSON blueprint in the exact same schema structure.
-        `,
-                    },
-                ],
-            },
-        ],
-        config: {
-            responseMimeType: "application/json",
-            thinkingConfig: { thinkingLevel: "LOW" },
-        },
-    });
-    return { blueprint: JSON.parse(response.text) };
-};
+// ============================================================================
+// 4. THE EXTRACTOR (Dynamic Provider Injection)
+// ============================================================================
+export const extractStepsForModule = async (moduleTitle, blueprint, routingConfig, courseId, command) => {
+    const extractorConfig = routingConfig.lesson; // Lesson extractor engine
 
-// 3. Extract Module Steps
-export const extractStepsForModule = async (
-    moduleTitle,
-    blueprint,
-    engineConfig,
-    courseId,
-    command,
-) => {
-    const prompt = `
-    Role: AI Tutor & Technical Writer.
-    Task: Generate an interactive UI lesson map for the module: "${moduleTitle}".
-    Course Context: ${JSON.stringify(blueprint)}
-    Refinement Command: ${command || "Focus on practical UI actions."}
-    `;
+    const prompt = `Module: "${moduleTitle}". Course Context: ${JSON.stringify(blueprint)}. Refinement: ${command || "Focus on practical UI actions."}`;
 
     const responseSchema = {
         type: Type.ARRAY,
         items: {
             type: Type.OBJECT,
             properties: {
-                step_type: {
-                    type: Type.STRING,
-                    enum: ["action_trigger", "dialogue"],
-                },
-                instruction_text: { type: Type.STRING },
-                required_action: {
-                    type: Type.STRING,
-                    enum: [
-                        "left_click",
-                        "double_click",
-                        "type_text",
-                        "drag_and_drop",
-                        "none",
-                    ],
-                },
-                ui_target: {
-                    type: Type.OBJECT,
-                    properties: {
-                        description: { type: Type.STRING },
-                        label: { type: Type.STRING },
-                    },
-                },
-                success_state: { type: Type.STRING },
+                step_type: { type: Type.STRING }, instruction_text: { type: Type.STRING },
+                required_action: { type: Type.STRING }, success_state: { type: Type.STRING },
+                ui_target: { type: Type.OBJECT, properties: { description: { type: Type.STRING } } }
             },
-            required: ["step_type", "instruction_text"],
-        },
+            required: ["step_type", "instruction_text"]
+        }
     };
 
-    const response = await ai.models.generateContent({
-        model: engineConfig.model || "gemini-3-flash-preview",
-        contents: [{ role: "user", parts: [{ text: prompt }] }],
-        config: {
-            responseMimeType: "application/json",
-            responseSchema: responseSchema,
-        },
-    });
-
-    return { steps: JSON.parse(response.text), usage: response.usageMetadata };
-};
-
-// 4. Refine Extracted Steps (AI Assisted Editing)
-export const refineModuleSteps = async (currentSteps, prompt, engineConfig) => {
-    const response = await ai.models.generateContent({
-        model: engineConfig.model || "gemini-3-flash-preview",
-        contents: [
-            {
-                role: "user",
-                parts: [
-                    {
-                        text: `
-            Here are the current UI action steps: ${JSON.stringify(currentSteps)}
-            The admin requested this change: "${prompt}"
-            Apply the change and return the updated JSON array. Keep the same schema.
-        `,
-                    },
-                ],
-            },
-        ],
-        config: { responseMimeType: "application/json" },
-    });
-    return { steps: JSON.parse(response.text) };
+    const result = await callAI(extractorConfig, prompt, "You are an AI UI Technical Writer.", responseSchema,[]);
+    return { steps: JSON.parse(result.text), usage: result.usage };
 };
