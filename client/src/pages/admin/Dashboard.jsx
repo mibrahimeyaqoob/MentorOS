@@ -1,13 +1,13 @@
 import React, { useState, useEffect } from "react";
 import { api } from "../../services/api";
 import { useToast } from "../../contexts/ToastContext";
-import { BookOpen, LayoutDashboard, Trash2, Loader2, BrainCircuit, Activity, Edit3 } from 'lucide-react';
+import { BookOpen, LayoutDashboard, Trash2, Loader2, BrainCircuit, Activity, Edit3, AlertCircle } from 'lucide-react';
 import { Link } from "react-router-dom";
 
 export default function Dashboard() {
     const { showToast } = useToast();
     const [courses, setCourses] = useState([]);
-    const [loading, setLoading] = useState(true);
+    const[loading, setLoading] = useState(true);
 
     useEffect(() => { loadCourses(); },[]);
 
@@ -31,7 +31,7 @@ export default function Dashboard() {
     if (loading) return <div className="p-10 text-center"><Loader2 size={40} className="animate-spin text-indigo-600 mx-auto"/></div>;
 
     return (
-        <div className="max-w-7xl mx-auto animate-in fade-in">
+        <div className="max-w-7xl mx-auto animate-in fade-in pb-12">
             <div className="flex justify-between items-center mb-8">
                 <div>
                     <h1 className="text-3xl font-black text-gray-900 flex items-center gap-3"><LayoutDashboard size={32} className="text-indigo-600" /> Fleet Manager</h1>
@@ -42,7 +42,7 @@ export default function Dashboard() {
                 </Link>
             </div>
 
-            <div className="bg-white rounded-2xl border shadow-sm overflow-hidden">
+            <div className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
                 <table className="w-full text-left border-collapse">
                     <thead>
                         <tr className="bg-gray-50 border-b text-xs uppercase tracking-widest text-gray-500">
@@ -58,11 +58,22 @@ export default function Dashboard() {
                         ) : courses.map((course) => (
                             <tr key={course.id} className="hover:bg-gray-50/50">
                                 <td className="p-4">
-                                    <p className="font-bold text-gray-900 text-base">{course.title}</p>
-                                    <p className="text-xs text-indigo-600 font-bold uppercase tracking-wider">{course.target_audience}</p>
+                                    <div className="flex items-center gap-2">
+                                        <p className="font-bold text-gray-900 text-base">{course.title}</p>
+
+                                        {/* 🔥 SHOW UNPUBLISHED EDITS BADGE IF DRAFT DATA EXISTS */}
+                                        {course.draft_data && course.status === 'published' && (
+                                            <span className="bg-amber-100 text-amber-700 text-[10px] px-2 py-0.5 rounded-md font-bold uppercase tracking-widest flex items-center gap-1">
+                                                <AlertCircle size={10}/> Unpublished Edits
+                                            </span>
+                                        )}
+                                    </div>
+                                    <p className="text-xs text-indigo-600 font-bold uppercase tracking-wider mt-1">{course.target_audience || "General Audience"}</p>
                                 </td>
                                 <td className="p-4">
-                                    <span className="px-3 py-1 rounded-full text-[10px] font-black uppercase bg-emerald-100 text-emerald-700">{course.status}</span>
+                                    <span className={`px-3 py-1 rounded-full text-[10px] font-black uppercase ${course.status === 'draft' ? 'bg-gray-100 text-gray-600' : 'bg-emerald-100 text-emerald-700'}`}>
+                                        {course.status}
+                                    </span>
                                 </td>
                                 <td className="p-4 font-bold text-gray-600">{course.course_modules?.[0]?.count || 0}</td>
                                 <td className="p-4 text-right space-x-2">

@@ -59,7 +59,6 @@ export const api = {
         });
         return { user: res.user, token: res.token };
     },
-
     login: async (identifier, password) => {
         const res = await fetchAPI("/api/auth/login", {
             method: "POST",
@@ -67,7 +66,6 @@ export const api = {
         });
         return { user: res.user, token: res.token };
     },
-
     recoverPassword: async (username, email, securityAnswer, newPassword) => {
         return await fetchAPI("/api/auth/recover", {
             method: "POST",
@@ -79,7 +77,6 @@ export const api = {
             }),
         });
     },
-
     updateProfile: async (
         id,
         name,
@@ -100,12 +97,10 @@ export const api = {
         });
         return res.user;
     },
-
     getUsers: async () => {
         const res = await fetchAPI("/api/auth/users");
         return res.users;
     },
-
     updateUserRoles: async (userId, roles) => {
         return await fetchAPI(`/api/auth/users/${userId}/roles`, {
             method: "PUT",
@@ -120,41 +115,34 @@ export const api = {
         const res = await fetchAPI("/api/system/keys");
         return res.keys;
     },
-
     addKey: async (name, key) => {
         return await fetchAPI("/api/system/keys", {
             method: "POST",
             body: JSON.stringify({ name, key }),
         });
     },
-
     deleteKey: async (id) => {
         return await fetchAPI(`/api/system/keys/${id}`, { method: "DELETE" });
     },
-
     testKey: async (id) => {
         return await fetchAPI(`/api/system/keys/${id}/test`, {
             method: "POST",
         });
     },
-
     getRouting: async () => {
         const res = await fetchAPI("/api/system/routing");
-        return res.routing; // Returns { architect: {}, lesson: {}, ... }
+        return res.routing;
     },
-
     updateRouting: async (config) => {
         return await fetchAPI("/api/system/routing", {
             method: "PUT",
             body: JSON.stringify({ config }),
         });
     },
-
     getAnalytics: async () => {
         const res = await fetchAPI("/api/system/analytics");
         return res.stats;
     },
-
     getAuditLogs: async () => {
         const res = await fetchAPI("/api/system/logs");
         return res.logs;
@@ -167,41 +155,36 @@ export const api = {
         const res = await fetchAPI("/api/courses");
         return res.courses;
     },
-
     getPublishedCourses: async () => {
         const res = await fetchAPI("/api/courses/published");
         return res.courses;
     },
-
     getCourse: async (id) => {
+        // FIX: We now return the whole response so UI gets res.course AND res.draft
         const res = await fetchAPI(`/api/courses/${id}`);
-        return res.course;
+        return res;
     },
-
-    // The Auto-Save function (handles both creation and updates)
     saveCourseDraft: async (courseData) => {
         return await fetchAPI("/api/courses/draft", {
             method: "POST",
             body: JSON.stringify(courseData),
         });
     },
-
-    // Finalize and Publish
+    discardDraft: async (id) => {
+        return await fetchAPI(`/api/courses/${id}/draft`, { method: "DELETE" });
+    },
     publishCourse: async (id) => {
         return await fetchAPI(`/api/courses/${id}/publish`, {
             method: "PUT",
         });
     },
-
     deleteCourse: async (id) => {
         return await fetchAPI(`/api/courses/${id}`, { method: "DELETE" });
     },
 
     // ============================================================
-    // 🧠 AI ENGINE (Architect, Extractor, Vector)
+    // 🧠 AI ENGINE
     // ============================================================
-
-    // Generate Blueprint (Now uses FormData for File Uploads)
     generateBlueprint: async (
         topic,
         audience,
@@ -220,15 +203,12 @@ export const api = {
                 formData.append("files", files[i]);
             }
         }
-
         const res = await fetchAPI("/api/ai/generate-blueprint", {
             method: "POST",
-            body: formData, // Note: fetchAPI automatically handles removing 'Content-Type' so browser sets boundaries
+            body: formData,
         });
         return res;
     },
-
-    // AI Edit Blueprint
     refineBlueprint: async (currentBlueprint, prompt, engineConfig) => {
         const res = await fetchAPI("/api/ai/refine-blueprint", {
             method: "POST",
@@ -236,7 +216,6 @@ export const api = {
         });
         return res;
     },
-
     extractModuleSteps: async (
         moduleTitle,
         blueprint,
@@ -256,8 +235,6 @@ export const api = {
         });
         return res;
     },
-
-    // AI Edit Module Steps
     refineModuleSteps: async (currentSteps, prompt, engineConfig) => {
         const res = await fetchAPI("/api/ai/refine-steps", {
             method: "POST",
@@ -265,7 +242,6 @@ export const api = {
         });
         return res;
     },
-
     ingestKnowledge: async (
         courseId,
         engineConfig,
@@ -282,18 +258,15 @@ export const api = {
             }),
         });
     },
-
     getKnowledgeChunks: async (courseId) => {
         const res = await fetchAPI(`/api/ai/brain/${courseId}`);
         return res.chunks;
     },
-
     deleteKnowledgeChunk: async (chunkId) => {
         return await fetchAPI(`/api/ai/brain/chunk/${chunkId}`, {
             method: "DELETE",
         });
     },
-
     testVectorSearch: async (courseId, query, engineConfig) => {
         const res = await fetchAPI("/api/ai/brain/search", {
             method: "POST",
